@@ -20,6 +20,7 @@ from typing import Optional, Union
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
+import torch.functional as F
 
 from ...activations import ACT2FN
 from ...modeling_outputs import BaseModelOutput, ImageClassifierOutput, SemanticSegmenterOutput
@@ -119,7 +120,8 @@ class SegformerOverlapPatchEmbeddings(nn.Module):
         embeddings = self.layer_norm(embeddings)
         return embeddings, height, width
 
-
+# nn.linear create weights and biases tensors (vectors)
+# Assigning these to the self variable sets them up to be modified/incorporate the learned weights
 class SegformerEfficientSelfAttention(nn.Module):
     """SegFormer's efficient self-attention mechanism. Employs the sequence reduction process introduced in the [PvT
     paper](https://huggingface.co/papers/2102.12122)."""
@@ -272,7 +274,7 @@ class SegformerDWConv(nn.Module):
 
         return hidden_states
 
-
+#mix transformer (feed forward network)
 class SegformerMixFFN(nn.Module):
     def __init__(self, config, in_features, hidden_features=None, out_features=None):
         super().__init__()
@@ -295,7 +297,7 @@ class SegformerMixFFN(nn.Module):
         hidden_states = self.dropout(hidden_states)
         return hidden_states
 
-
+# One full transformer block
 class SegformerLayer(nn.Module):
     """This corresponds to the Block class in the original implementation."""
 
@@ -747,6 +749,49 @@ class SegformerForSemanticSegmentation(SegformerPreTrainedModel):
             hidden_states=outputs.hidden_states if output_hidden_states else None,
             attentions=outputs.attentions,
         )
+
+class SCNNLayer(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, kernel_size=(1, 9), padding=(0, 4))
+
+    def forward(self, x):
+        for i in range(1, x.size(2)):
+            x[:, :, i, :] += F.relu(self.conv(x[:, :, i - 1, :]))
+        return x
+
+
+class SegformerSCNNHead(nn.Module):
+    def __init__(self, in_channels, num_classes):
+        super().__init__()
+        self.scnn_layer = SCNNLayer(in_channels)
+        self.conv_out = nn.Conv2d(in_channels, num_classes, kernel_size=3, padding=1)
+
+    def forward(self, features):
+        # features = output from backbone, typically a list of hidden states
+        x = features[-1]  # use deepest feature map (P4)
+        x = self.scnn_layer(x)
+        x = self.conv_out(x)
+        return x
+
+class SegformerForLaneDetectionSCNN(SegformerPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.segformer = SegformerModel(config)  # backbone
+        self.decode_head = SegformerSCNNHead(in_channels=256, num_classes=config.num_labels)
+        self.post_init()
+
+    def forward(
+        self,
+        pixel_values=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        outputs = self.segformer(pixel_values, output_hidden_states=True, return_dict=True)
+        features = outputs.hidden_states
+        logits = self.decode_head(features)
+        return logits
+
 
 
 __all__ = [
