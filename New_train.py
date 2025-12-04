@@ -1,8 +1,7 @@
 from torch.utils.data import DataLoader
 import torch
 
-dataset = ...                         # your lane dataset
-dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+dataset = load_dataset("tusimple", split="train", streaming=True)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
